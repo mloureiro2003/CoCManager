@@ -492,8 +492,11 @@ class Character extends Fighter {
             { name: 'size', label: "SIZ", type: 'number', required: true, value: 50 },
             { name: 'pow', label: "POW", type: 'number', required: true, value: 50 },
             { name: 'san', label: "Current SAN", type: 'number', required: true, value: 50 },
-            { name: 'hp', label: "Current HP", type: 'number', required: false },
-            { name: 'magic', label: "Current MP", type: 'number', required: false }
+            // Only show current HP/MP fields when editing
+            ...(isNew ? [] : [
+                 { name: 'hp', label: "Current HP", type: 'number', required: false },
+                 { name: 'magic', label: "Current MP", type: 'number', required: false }
+            ])
         ];
 
         fields.forEach(field => {
@@ -506,7 +509,8 @@ class Character extends Fighter {
                 input.max = 200; // Allow higher values for HP etc.
             }
             input.required = field.required;
-            input.value = isNew ? field.value || '' : character[field.name];
+            // Use existing value if editing, otherwise default or empty
+            input.value = !isNew ? character[field.name] : (field.value || '');
 
             const div = createElement('div', null, 'form-group');
             div.append(label, input);
@@ -520,6 +524,7 @@ class Character extends Fighter {
         document.getElementById('name').focus();
     }
 
+    // *** THIS FUNCTION IS FIXED ***
     static handleCharacterForm(form, index) {
         const isNew = index === -1;
         const data = new FormData(form);
@@ -531,14 +536,18 @@ class Character extends Fighter {
         const size = validateNumber(data.get('size'), 100);
         const pow = validateNumber(data.get('pow'), 100);
 
-        // Derived stats are calculated on creation, but can be manually set/edited
-        let hp = validateNumber(data.get('hp'));
+        // Current SAN is always taken from the form
         let san = validateNumber(data.get('san'));
-        let magic = validateNumber(data.get('magic'));
 
+        let hp, magic;
         if (isNew) {
-            hp = hp || Math.floor((cons + size) / 10);
-            magic = magic || Math.floor(pow / 5);
+            // **Always calculate HP and MP for new characters**
+            hp = Math.floor((cons + size) / 10);
+            magic = Math.floor(pow / 5);
+        } else {
+            // **Use form values for existing characters**
+            hp = validateNumber(data.get('hp'));
+            magic = validateNumber(data.get('magic'));
         }
 
         const characterData = { name, dex, hp, san, cons, pow, str, size, spells: isNew ? [] : Character.characters[index].spells, magic };
@@ -551,7 +560,7 @@ class Character extends Fighter {
         }
 
         Character.save();
-        alert(`Investigator "${name}" has been ${isNew ? 'added' : 'updated'}!`);
+        alert(`Investigator "${name}" has been ${isNew ? 'added' : 'updated'}! HP: ${hp}, MP: ${magic}`);
         Character.listCharacters();
     }
 }
@@ -738,30 +747,54 @@ class NPC extends Fighter {
 class Combat {
      constructor(name, fighters = []) {
         this.name = name;
-        this.fighters = fighters;
+        // Store fighter identifiers (type and original index) instead of full objects
+        this.fighters = fighters.map(f => {
+            if (f instanceof Character) {
+                return { type: 'Character', index: Character.characters.indexOf(f) };
+            } else if (f instanceof NPC) {
+                return { type: 'NPC', index: NPC.npcs.indexOf(f) };
+            }
+            return null; // Should not happen
+        }).filter(f => f !== null && f.index !== -1); // Filter out potential errors or missing fighters
     }
 
     static combats = [];
     static localStorageKey = "coc_combats_db";
     static mainContent = null;
-    
+
     // Combat instance state
     static activeCombat = {
         name: '',
-        fighters: [],
+        fighters: [], // Holds cloned instances for the current combat
         turn: 0,
         round: 1
     };
 
     static load() {
         const raw = loadData(Combat.localStorageKey);
-        Combat.combats = raw.map(c => new Combat(c.name, c.fighters));
+        // Reconstruct combats, keeping fighter identifiers
+        Combat.combats = raw.map(c => new Combat(c.name, c.fighters.map(f => {
+             // Re-map identifiers back to temporary objects for the constructor
+            if (f.type === 'Character' && Character.characters[f.index]) {
+                return Character.characters[f.index];
+            } else if (f.type === 'NPC' && NPC.npcs[f.index]) {
+                return NPC.npcs[f.index];
+            }
+            return null;
+        }).filter(f => f !== null)));
+        console.log(`Loaded ${Combat.combats.length} combats.`);
     }
 
+
     static save() {
-        saveData(Combat.localStorageKey, Combat.combats);
+        // Save combats with fighter identifiers
+        saveData(Combat.localStorageKey, Combat.combats.map(c => ({
+            name: c.name,
+            fighters: c.fighters // Already stored as identifiers
+        })));
     }
-    
+
+
     static renderCombatMenu() {
         Combat.mainContent.innerHTML = '<h2>Combat Manager</h2>';
         const ul = createElement('ul', null, 'menu-list');
@@ -775,20 +808,30 @@ class Combat {
         });
         Combat.mainContent.appendChild(ul);
     }
-    
+
     static listCombats() {
         Combat.mainContent.innerHTML = '<h2>Saved Combats</h2>';
-        
+
         if (Combat.combats.length === 0) {
             Combat.mainContent.appendChild(createElement('p', 'No combats saved. Create one to begin!'));
         } else {
             const ul = createElement('ul', null, 'character-list');
             Combat.combats.forEach((combat, index) => {
                 const li = createElement('li');
+                // Get fighter names from original arrays using identifiers
+                const fighterNames = combat.fighters.map(f => {
+                    if (f.type === 'Character' && Character.characters[f.index]) {
+                        return Character.characters[f.index].name;
+                    } else if (f.type === 'NPC' && NPC.npcs[f.index]) {
+                        return NPC.npcs[f.index].name;
+                    }
+                    return '[Unknown]';
+                }).join(', ');
+
                 li.innerHTML = `
                     <div style="flex-grow: 1;">
                         <span style="font-weight: bold; font-size: 1.1em;">${combat.name}</span><br>
-                        <small>${combat.fighters.length} fighters</small>
+                        <small>Fighters: ${fighterNames || 'None'}</small>
                     </div>
                     <div>
                         <button class="btn" onclick="Combat.startCombat(${index})">Run</button>
@@ -799,12 +842,12 @@ class Combat {
             });
             Combat.mainContent.appendChild(ul);
         }
-        
+
         const controls = createElement('div', null, 'combat-controls');
         controls.appendChild(createElement('button', '← Back to Combat Menu', 'btn', Combat.renderCombatMenu));
         Combat.mainContent.appendChild(controls);
     }
-    
+
     static renderNewCombatForm() {
         Combat.mainContent.innerHTML = '<h2>Create New Combat</h2>';
         const form = createElement('form');
@@ -813,57 +856,69 @@ class Combat {
         form.innerHTML = `
             <label for="combat-name">Combat Name:</label>
             <input type="text" id="combat-name" name="name" required>
-            
+
             <h3>Select Fighters</h3>
             <h4>Investigators</h4>
             <div id="char-list"></div>
             <h4>NPCs</h4>
             <div id="npc-list"></div>
-            
+
             <button type="submit" class="btn">Create Combat</button>
         `;
-        
+
         const charList = form.querySelector('#char-list');
-        Character.characters.forEach((char, index) => {
-            charList.innerHTML += `<div><input type="checkbox" id="c${index}" value="char-${index}"><label for="c${index}"> ${char.name}</label></div>`;
-        });
+        if (Character.characters.length > 0) {
+            Character.characters.forEach((char, index) => {
+                charList.innerHTML += `<div><input type="checkbox" id="c${index}" value="char-${index}"><label for="c${index}"> ${char.name} (DEX: ${char.dex})</label></div>`;
+            });
+        } else {
+             charList.innerHTML = `<p>No investigators available.</p>`;
+        }
+
 
         const npcList = form.querySelector('#npc-list');
-        NPC.npcs.forEach((npc, index) => {
-            npcList.innerHTML += `<div><input type="checkbox" id="n${index}" value="npc-${index}"><label for="n${index}"> ${npc.name}</label></div>`;
-        });
+         if (NPC.npcs.length > 0) {
+            NPC.npcs.forEach((npc, index) => {
+                npcList.innerHTML += `<div><input type="checkbox" id="n${index}" value="npc-${index}"><label for="n${index}"> ${npc.name} (DEX: ${npc.dex})</label></div>`;
+            });
+        } else {
+            npcList.innerHTML = `<p>No NPCs available.</p>`
+        }
+
 
         Combat.mainContent.appendChild(form);
         Combat.mainContent.appendChild(createElement('button', '← Cancel', 'btn btn-secondary', Combat.renderCombatMenu));
     }
-    
+
     static handleNewCombatForm(form) {
         const formData = new FormData(form);
         const name = formData.get('name').trim();
-        const selectedFighters = [];
-        
+        const selectedFightersInput = []; // Store original objects temporarily
+
         form.querySelectorAll('input[type="checkbox"]:checked').forEach(checkbox => {
             const [type, indexStr] = checkbox.value.split('-');
             const index = parseInt(indexStr);
-            if (type === 'char') {
-                selectedFighters.push(Character.characters[index]);
-            } else if (type === 'npc') {
-                selectedFighters.push(NPC.npcs[index]);
+            if (type === 'char' && Character.characters[index]) {
+                selectedFightersInput.push(Character.characters[index]);
+            } else if (type === 'npc' && NPC.npcs[index]) {
+                selectedFightersInput.push(NPC.npcs[index]);
             }
         });
 
-        if (!name || selectedFighters.length === 0) {
+        if (!name || selectedFightersInput.length === 0) {
             alert("Please provide a name and select at least one fighter.");
             return;
         }
 
-        const newCombat = new Combat(name, selectedFighters);
+        // Create combat using the temporary objects (constructor will handle identifiers)
+        const newCombat = new Combat(name, selectedFightersInput);
         Combat.combats.push(newCombat);
         Combat.save();
         alert(`Combat "${name}" created!`);
         Combat.listCombats();
     }
-    
+
+
     static deleteCombat(index) {
         if (loopControl(`Are you sure you want to delete "${Combat.combats[index].name}"?`)) {
             Combat.combats.splice(index, 1);
@@ -871,19 +926,35 @@ class Combat {
             Combat.listCombats();
         }
     }
-    
+
     static startCombat(index) {
         const sourceCombat = Combat.combats[index];
         Combat.activeCombat.name = sourceCombat.name;
-        // Deep clone fighters for the combat instance
-        Combat.activeCombat.fighters = sourceCombat.fighters.map(f => f.type === 'Character' ? Character.cloneCharacter(f) : NPC.cloneNPC(f));
+
+        // Clone fighters based on identifiers in the saved combat
+        Combat.activeCombat.fighters = sourceCombat.fighters.map(f => {
+            if (f.type === 'Character' && Character.characters[f.index]) {
+                return Character.cloneCharacter(Character.characters[f.index]);
+            } else if (f.type === 'NPC' && NPC.npcs[f.index]) {
+                return NPC.cloneNPC(NPC.npcs[f.index]);
+            }
+            return null; // Handle cases where original fighter might have been deleted
+        }).filter(f => f !== null); // Filter out nulls
+
+        if (Combat.activeCombat.fighters.length === 0) {
+             alert("Cannot start combat: No valid fighters found (original fighters might have been deleted).");
+             Combat.renderCombatMenu();
+             return;
+        }
+
         Combat.activeCombat.fighters.sort((a, b) => b.dex - a.dex);
         Combat.activeCombat.turn = 0;
         Combat.activeCombat.round = 1;
 
         Combat.renderCombatTurn();
     }
-    
+
+
     static renderCombatTurn() {
         MAIN_CONTENT.innerHTML = `
             <h2>${Combat.activeCombat.name} - Round ${Combat.activeCombat.round}</h2>
@@ -894,8 +965,17 @@ class Combat {
         const tracker = MAIN_CONTENT.querySelector('#combat-tracker');
         const controls = MAIN_CONTENT.querySelector('.combat-controls');
 
+        // Check if combat ended (only one fighter left or none)
+        if (Combat.activeCombat.fighters.length <= 1) {
+             const winner = Combat.activeCombat.fighters[0];
+             tracker.innerHTML = `<h3>Combat Over!</h3><p>${winner ? winner.name + ' is the last one standing!' : 'No fighters left.'}</p>`;
+             controls.appendChild(createElement('button', 'Back to Combat Menu', 'btn', Combat.renderCombatMenu));
+             return; // Stop rendering turns
+        }
+
         Combat.activeCombat.fighters.forEach((fighter, index) => {
             const card = createElement('div', null, 'fighter-card');
+             card.id = `fighter-${index}`; // Add unique ID for easier selection
             if (index === Combat.activeCombat.turn) {
                 card.classList.add('active-fighter');
             }
@@ -913,12 +993,12 @@ class Combat {
                 actions.appendChild(createElement('button', 'End Turn', 'btn btn-secondary', () => Combat.endTurn()));
             }
         });
-        
+
         controls.appendChild(createElement('button', 'End Combat', 'btn btn-delete', () => {
              if(confirm('Are you sure you want to end this combat? Progress will be lost.')) Combat.renderCombatMenu();
         }));
     }
-    
+
     static endTurn() {
         Combat.activeCombat.turn++;
         if (Combat.activeCombat.turn >= Combat.activeCombat.fighters.length) {
@@ -937,15 +1017,26 @@ class Combat {
                 card.onclick = () => Combat.selectTargetForAttack(index);
             }
         });
-        MAIN_CONTENT.querySelector('.active-fighter .actions').innerHTML = '<p><strong>Select a target...</strong></p>';
+        MAIN_CONTENT.querySelector('.active-fighter .actions').innerHTML = '<p><strong>Select a target to attack...</strong></p>';
     }
-    
+
+    // *** THIS FUNCTION IS FIXED ***
     static selectTargetForAttack(targetIndex) {
-        const damage = prompt(`Enter damage amount for ${Combat.activeCombat.fighters[targetIndex].name}:`);
-        if (damage === null || damage.trim() === '') return;
-        
-        const amount = validateNumber(damage);
+        const attacker = Combat.activeCombat.fighters[Combat.activeCombat.turn];
         const target = Combat.activeCombat.fighters[targetIndex];
+
+        // **Ask if the attack hit first**
+        if (!confirm(`Did ${attacker.name}'s attack hit ${target.name}?`)) {
+            alert(`${attacker.name} missed ${target.name}.`);
+            Combat.endTurn();
+            return; // Stop if the attack missed
+        }
+
+        // **Only ask for damage if it hit**
+        const damage = prompt(`Enter damage amount inflicted on ${target.name}:`);
+        if (damage === null || damage.trim() === '') return; // Allow cancelling the damage prompt
+
+        const amount = validateNumber(damage);
         target.hp -= amount;
 
         alert(`${target.name} takes ${amount} damage! New HP: ${target.hp}`);
@@ -953,15 +1044,25 @@ class Combat {
         if (target.hp <= 0) {
             alert(`${target.name} has been defeated!`);
             Combat.activeCombat.fighters.splice(targetIndex, 1);
-            // Adjust turn if the removed fighter was before the current one
-            if (targetIndex < Combat.activeCombat.turn) {
-                Combat.activeCombat.turn--;
+            // Adjust turn if the removed fighter was before or *was* the current fighter's index before removal
+             if (targetIndex <= Combat.activeCombat.turn) {
+                 // Check necessary because if the *last* fighter is removed, turn should wrap around correctly
+                 if(Combat.activeCombat.turn > 0) {
+                     Combat.activeCombat.turn--;
+                 }
             }
+             // Ensure turn index is valid after potential removal
+             if (Combat.activeCombat.turn >= Combat.activeCombat.fighters.length) {
+                 Combat.activeCombat.turn = 0; // Wrap around if necessary
+                  if (Combat.activeCombat.fighters.length > 0) Combat.activeCombat.round++; // Only advance round if fighters remain
+             }
+
         }
-        
+
         Combat.endTurn();
     }
 }
+
 
 // ===================================================
 // APP STARTUP
